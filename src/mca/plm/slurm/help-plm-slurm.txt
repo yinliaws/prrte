@@ -65,3 +65,24 @@ by augmenting the cmd line with:
 * "--debug-daemons"
 * "--leave-session-attached"
 * "--prtemca plm_base_verbose N" where N > 0
+#
+[daemons-never-reported]
+The primary srun that launched the per-node daemons exited cleanly, but
+only %d of %d daemons ever reported in, so the job cannot start.
+
+By default a prted forks and detaches, and the srun that launched it exits
+as soon as the daemon signals that it is running. A clean exit is therefore
+normally just that hand-off. This one arrived before the daemons were up,
+which means they did not start, or were killed before they could report -
+for example if the resource manager reaped them once the launching step
+completed.
+
+You may debug this problem further by augmenting the cmd line with:
+
+* "--debug-daemons"
+* "--leave-session-attached"
+* "--prtemca plm_base_verbose N" where N > 0
+
+Note that both "--debug-daemons" and "--leave-session-attached" keep the
+daemon attached to the launching srun, which can make the problem go away
+while you are looking for it.

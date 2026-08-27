@@ -710,10 +710,22 @@ static void srun_wait_cb(int sd, short fd, void *cbdata)
                  * A clean exit here is that hand-off, not termination -
                  * daemon loss is instead caught when its RML connection
                  * to the HNP actually drops. */
-                PMIX_OUTPUT_VERBOSE((1, prte_plm_base_framework.framework_output,
-                                     "%s plm:slurm: primary srun exited after "
-                                     "daemon hand-off",
-                                     PRTE_NAME_PRINT(PRTE_PROC_MY_NAME)));
+                if (NULL != jdata && jdata->num_reported < jdata->num_procs) {
+                    /* ...but not every daemon has reported in, so there was
+                     * nothing to hand off: the launch did not finish. Waiting
+                     * for the RML connection to drop cannot catch this, since
+                     * a daemon that never connected has no connection to
+                     * lose, so it has to be caught here or the DVM waits for
+                     * daemons that are never coming. */
+                    prte_show_help("help-plm-slurm.txt", "daemons-never-reported", true,
+                                   (int) jdata->num_reported, (int) jdata->num_procs);
+                    PRTE_ACTIVATE_JOB_STATE(jdata, PRTE_JOB_STATE_FAILED_TO_START);
+                } else {
+                    PMIX_OUTPUT_VERBOSE((1, prte_plm_base_framework.framework_output,
+                                         "%s plm:slurm: primary srun exited after "
+                                         "daemon hand-off",
+                                         PRTE_NAME_PRINT(PRTE_PROC_MY_NAME)));
+                }
             }
         }
     }
