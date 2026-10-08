@@ -1142,6 +1142,11 @@ static void launch_daemons(int fd, short args, void *cbdata)
 
     /* setup the virtual machine */
     daemons = prte_get_job_data_object(PRTE_PROC_MY_NAME->nspace);
+    if (NULL == daemons) {
+        PRTE_ERROR_LOG(PRTE_ERR_NOT_FOUND);
+        rc = PRTE_ERR_NOT_FOUND;
+        goto cleanup;
+    }
     if (PRTE_SUCCESS != (rc = prte_plm_base_setup_virtual_machine(state->jdata))) {
         PRTE_ERROR_LOG(rc);
         goto cleanup;
@@ -1514,10 +1519,12 @@ static int launch_agent_setup(const char *agent, char *path)
 
     bname = pmix_basename(ssh_agent_argv[0]);
     if (NULL != bname && 0 == strcmp(bname, "ssh")) {
-        /* if xterm option was given, add '-X', ensuring we don't do it twice */
-        if (NULL != prte_xterm) {
-            PMIx_Argv_append_unique_nosize(&ssh_agent_argv, "-X");
-        } else if (0 >= pmix_output_get_verbosity(prte_plm_base_framework.framework_output)) {
+        /* "--xterm" is a directive of a job, not of the DVM, so it cannot
+         * be what decides X11 forwarding for daemons that may be launched
+         * long before any job asks for it.  A DVM that is to host xterms
+         * on remote nodes is started with "ssh -X" as its agent (the
+         * plm_ssh_agent param), which the check below leaves alone. */
+        if (0 >= pmix_output_get_verbosity(prte_plm_base_framework.framework_output)) {
             /* if debug was not specified, and the user didn't explicitly
              * specify X11 forwarding/non-forwarding, add "-x" if it
              * isn't already there (check either case)

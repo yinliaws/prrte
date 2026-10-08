@@ -482,6 +482,10 @@ int prte_pmix_xfer_job_info(prte_job_t *jdata,
              * apply this to the daemons */
             if (!prte_persistent) {
                 djob = prte_get_job_data_object(PRTE_PROC_MY_NAME->nspace);
+                if (NULL == djob) {
+                    PRTE_ERROR_LOG(PRTE_ERR_NOT_FOUND);
+                    return PRTE_ERR_NOT_FOUND;
+                }
                 prte_set_bool_attribute(&djob->attributes, PRTE_JOB_DO_NOT_LAUNCH, PRTE_ATTR_GLOBAL, flag);
             }
 
@@ -523,6 +527,11 @@ int prte_pmix_xfer_job_info(prte_job_t *jdata,
            /*** EXEC AGENT ***/
         } else if (PMIX_CHECK_KEY(info, PMIX_EXEC_AGENT)) {
             prte_set_attribute(&jdata->attributes, PRTE_JOB_EXEC_AGENT, PRTE_ATTR_GLOBAL,
+                               info->value.data.string, PMIX_STRING);
+
+            /*** XTERM ***/
+        } else if (PMIX_CHECK_KEY(info, PRTE_XTERM_RANKS)) {
+            prte_set_attribute(&jdata->attributes, PRTE_JOB_XTERM, PRTE_ATTR_GLOBAL,
                                info->value.data.string, PMIX_STRING);
 
             /***   STOP ON EXEC FOR DEBUGGER   ***/

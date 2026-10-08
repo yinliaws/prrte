@@ -36,6 +36,15 @@ It is **not** a Docker Swarm in the orchestration sense — just ten plain
 > coverage. The old "git-archive the committed tree into the image" flow (and
 > the copy-files-into-ten-containers workaround) is gone.
 
+> **The suite is no longer container-only.** `./run-tests.sh cluster` runs
+> the *same* cases on real nodes over ssh — see §22 and
+> [`docs/testing/cluster.rst`](../../docs/testing/cluster.rst). The cases
+> speak in logical node names (`node1`..`node10`) and reach them through a
+> transport layer; only that layer knows whether they are containers or
+> compute nodes. **Any new case must go through it** — `RUN`, `ON`, `ONT`,
+> `EXEC_SH`, `EXEC_TOOL`, `COPY_IN`, `kill_stray` — and never call `docker`
+> directly, or it silently becomes container-only.
+
 > Orientation for an AI agent or new contributor: read this file top to bottom,
 > then run the Quick start. The one thing that will silently waste your time is
 > forgetting `--prtemca prte_elastic_mode 1` when starting the DVM by hand — see
@@ -48,7 +57,8 @@ It is **not** a Docker Swarm in the orchestration sense — just ten plain
 | File | Purpose |
 |------|---------|
 | `build.sh` | Builds PRRTE (and optionally PMIx) from your **live** tree via VPATH: into a shared volume for the Linux swarm, or natively for macOS. Start here. |
-| `run-tests.sh` | Runs the test suite and reports PASS/FAIL: the full multi-node suite on Linux, a single-host subset on macOS. |
+| `run-tests.sh` | Runs the test suite and reports PASS/FAIL: the full multi-node suite on Linux, the same suite on a real cluster (`cluster`, §22), a single-host subset on macOS. |
+| `cluster-setup.sh` | Prepares a real cluster for `run-tests.sh cluster`: compiles the helper clients below into an existing PRRTE install, then checks every node is reachable, carries that install, and has node-local scratch. See §22. |
 | `Dockerfile` | Base image: toolchain, a baked PMIx, SSH wiring, and a node entrypoint. It does **not** contain PRRTE. |
 | `docker-compose.yml` | The ten nodes `prte-node1`..`prte-node10`, each mounting the shared `prte-build` volume. Every one of those names derives from `$PRTE_SWARM`, so two clones can each run a swarm — see §4. |
 | `elastic.c` | The elastic test client (`elastic` in the install): issues a PMIx allocation request and waits for the phase-two completion event. |
@@ -88,9 +98,28 @@ It is **not** a Docker Swarm in the orchestration sense — just ten plain
   (`vpath-macos`, on the host) coexist from the same pristine sources.
 - **Never stale, no commit.** Change a file, rerun `build.sh`, and the swarm
   runs your change (the build is incremental).
-- **Both code bases (optional).** Set `PMIX_SRC=/path/to/openpmix` and `build.sh`
-  builds PMIx from source too; otherwise PMIx is the copy baked into the image
-  (Linux) or an installed PMIx (macOS).
+- **Both code bases, always.** PRRTE uses PMIx *internals*, so the pair is one
+  code base in two repositories and testing one against a frozen copy of the
+  other tests neither properly. Every Linux run therefore builds PMIx from
+  source: from `PMIX_SRC=/path/to/openpmix` when you set it, otherwise from a
+  checkout `build.sh` maintains inside the volume and fetches forward each
+  run. `PMIX_SRC=baked` opts out to the image's copy, for working offline or
+  against a pinned PMIx, and says loudly that PMIx is not being tested. Every
+  path prints the PMIx commit it compiled. (macOS: `PMIX_SRC`, else
+  `PMIX_HOME`, else autodetect.)
+
+  This is not a preference. The suite once reported four failures in
+  `groupinv` and `fencer` that were PMIx bugs openpmix had fixed three days
+  earlier — the harness was simply running a PMIx older than the fixes, and
+  nothing in the output said so.
+- **Built the way containers always build PRRTE.** The Linux build configures
+  with `--enable-prte-prefix-by-default`, so a remote daemon is launched by
+  its full path. A non-interactive ssh shell never sources `env.sh`, and the
+  tests run a bare `prterun` off `PATH`, which passes no prefix of its own;
+  without the flag the remote shell finds `prted` only through the
+  `/usr/local/bin` links the node entrypoint makes when a container *starts*.
+  A swarm brought up before the volume held an install has none of those
+  links, and every multi-node case fails with "Daemon exit status: 127".
 
 ### When a distclean is actually needed
 
@@ -237,6 +266,14 @@ docker compose up -d       # start prte-node1 .. prte-node10
 # ---- and run the host-side suites from that build, not the source tree ----
 make -C ../../vpath-macos check
 make -C ../../vpath-macos/test/offline check-offline
+```
+
+```sh
+# ---- a real cluster (the same suite, over ssh) ----
+./cluster-setup.sh --prefix /shared/prrte     # build the clients, check the nodes
+PRTE_CLUSTER_PREFIX=/shared/prrte \
+PRTE_CLUSTER_NODES=cn01,cn02,cn03,cn04 \
+  ./run-tests.sh cluster
 ```
 
 Keeping the host side out of tree as well is the intended workflow, not
@@ -781,6 +818,27 @@ docker inspect prte-node1 --format '{{.Image}}'
 docker images --no-trunc --format '{{.ID}}' prte-swarm:latest
 ```
 
+### The baked PMIx is a fallback, and the managed checkout is why
+
+`build.sh` keeps its own openpmix checkout at `/opt/prte/pmix-src` in the
+shared volume, cloned from `PMIX_REPO` at `PMIX_REF` (default: openpmix
+master) and `git fetch`ed forward on every run. It lives in the volume rather
+than being bind-mounted because it has to be *writable*: `autogen.pl` runs in
+the container, against the autotools the container has. A tree autogen'd on a
+macOS host with automake 1.18 and then compiled against the container's 1.16
+walks straight into maintainer-mode regeneration and dies with
+`aclocal-1.18: command not found`.
+
+A fetch that fails (no network) is a warning, not an error — the checkout it
+already has still gets built, and the run says so. Having no checkout *and*
+no network is an error, because the alternative is silently testing the baked
+copy, which is the failure this whole arrangement exists to prevent.
+
+Switching between sources changes the PMIx build directory's source tree, so
+`.configure-args` records which tree configured it and the build dir is
+started clean when that changes. Objects compiled against `/pmix-src` cannot
+be relinked for `/opt/prte/pmix-src`; reconfiguring alone is not enough.
+
 ### Rebuilding the image really does need `--no-cache`
 
 `./build.sh image` alone is often not enough. The Dockerfile builds the
@@ -1161,10 +1219,12 @@ docker ps -q | xargs -I{} docker inspect --format \
 |----------|----|
 | pick up a PRRTE source edit | `./build.sh` (incremental into the volume) |
 | pick up an openpmix edit | `PMIX_SRC=/path/to/openpmix ./build.sh` |
+| test against current upstream PMIx | `./build.sh` — the default fetches the managed checkout forward and rebuilds it; no `PMIX_SRC` needed |
+| pin PMIx, or build with no network | `PMIX_SRC=baked ./build.sh` (the image's copy — PMIx is then not under test), or `PMIX_REF=v6.0 ./build.sh` |
 | run the suite against components built as DSOs | `PRTE_SWARM_MCA_DSO=1 ./build.sh` then the ordinary `./run-tests.sh linux` — see §6, "Components as DSOs" |
 | force a clean PRRTE rebuild | `docker volume rm prte-build && ./build.sh` |
 | pick up an **added or deleted `Makefile.am`** | `docker volume rm prte-build && ./build.sh` — not an ordinary `./build.sh`. The volume's build dir carries the previous `configure` run's dependency list, so a `Makefile.am` that no longer exists (or a new one) sends maintainer mode looking for `automake` *inside the container*, which does not have it: the build dies with `automake-1.18: command not found` and `Error 127` out of `/prrte-src/src/Makefile.in`. The host regenerating `Makefile.in` does not help — it is the build dir's own Makefile that is stale |
-| rebuild the base image (new baked PMIx) | `docker build --no-cache --build-arg PMIX_REF=master -t prte-swarm:latest .` — `./build.sh image` reuses docker's cached `git clone`; then wipe the volume's VPATH dirs and recreate the containers (see "The containers persist too") |
+| rebuild the base image | `docker build --no-cache --build-arg PMIX_REF=master -t prte-swarm:latest .` — `./build.sh image` reuses docker's cached `git clone`; then wipe the volume's VPATH dirs and recreate the containers (see "The containers persist too"). Rarely needed now that PMIx is built from source every run: this moves the *fallback* copy and the toolchain, not the PMIx under test |
 | tear down the swarm | `docker compose down` (the `prte-build` volume persists) |
 | run a second, independent swarm | `export PRTE_SWARM=alt` and repeat the quick start — see §4. Every command in this table then names that swarm's volume (`alt-build`) and containers (`alt-node*`), and **a `docker compose down` without the variable takes down the *default* swarm** |
 
@@ -1331,7 +1391,7 @@ commands rather than replacing them:
   to the real command.
 
 What is left here is the **compile** coverage: `build.sh` still passes
-`--with-jansson`, so `ras_slurm_jansson.c` (the ~1000-line parser) is
+`--with-jansson`, so the `ras_slurm_jansson*.c` parser files are
 compiled by the harness that gets built on every change, rather than only by
 the slower sibling. Nothing in this suite runs it.
 
@@ -2220,3 +2280,151 @@ the lost-connection sweep for finalized peers, and that sweep is #4127's second
 driver, so with #4124 in place this workload cannot reach #4112 at all.
 
 Mind the `PMIX_SRC` staleness trap when doing that A/B — see §2.
+
+## 22. The same suite on a real cluster (`run-tests.sh cluster`)
+
+The user-facing account is
+[`docs/testing/cluster.rst`](../../docs/testing/cluster.rst); this section
+is the maintainer's half — how the transport works and what keeps it
+working.
+
+### Nothing below the transport knows where it is
+
+Every case speaks in **logical** node names. `node1` is the head node,
+`node2` upwards are the rest, and a case reaches one only through:
+
+| primitive | what it does |
+|-----------|--------------|
+| `RUN cmd` | on the head node, with the tools on `PATH` |
+| `ON n cmd` | on node *n*, plain shell (housekeeping) |
+| `ONT n cmd` | on node *n*, with the tools |
+| `RUN_BG out cmd` | on the head node, detached, output to a file |
+| `EXEC_SH` / `EXEC_TOOL` / `EXEC_SH_BG` / `EXEC_TOOL_BG` | the four underneath |
+| `COPY_IN src n dst` | put a local file on node *n* |
+| `NODE_IP n` | node *n*'s own address, as its peers see it |
+| `kill_stray n name` | reap one stray process **of ours** on node *n* |
+
+In swarm mode those are `docker exec`/`docker cp`; in cluster mode they are
+`ssh`, with the head node driven locally. **A case that calls `docker`
+directly is container-only and will be wrong on a cluster** — that is the
+single rule to keep in mind when adding one.
+
+### The name mapping, and the bug it is easy to reintroduce
+
+A cluster's machines are not called `node2`, so `to_real` rewrites a
+command on its way out and `to_logical` rewrites the output on its way
+back. That is what lets 800-odd `node<N>` references, and assertions
+written as `grep -c node2`, keep meaning what they meant.
+
+Both directions use a **two-pass marker** substitution, and both have to.
+A single ordered chain of replacements is wrong whenever one node's real
+name is another node's logical name: `s/node5/node2/g; s/node2/node5/g`
+puts back exactly what the first rule removed. That cannot happen on a
+cluster whose machines are called `nid001234` — and it happens every time
+on one whose machines are called `node<N>`, which is precisely the
+configuration you reach for when checking the mapping works at all. It was
+found that way, by running cluster mode against this swarm with the node
+list **shifted** (`PRTE_CLUSTER_NODES=node3,node5,node7,...`), and that is
+the cheapest way to re-check it:
+
+```sh
+docker cp run-tests.sh prte-node1:/tmp/run-tests.sh
+docker exec -e PRTE_CLUSTER_NODES=node3,node5,node7,node9,node2,node4,node6,node8,node10,node1 \
+            -e PRTE_CLUSTER_PREFIX=/opt/prte/prte -e TEST_ONLY=test_include \
+            prte-node1 bash -lc '/tmp/run-tests.sh cluster'
+```
+
+The swarm is a perfectly good stand-in cluster for this: ten separate
+machines as far as ssh is concerned, with sshd already wired up. Use it to
+check a transport change before claiming it works.
+
+Output rewriting keeps stdout and stderr **apart** (`_relabel`). Several
+cases capture only stdout and assert on it; merging the daemon's chatter
+into it would quietly change what they match.
+
+### The one rule a new case has to follow: redirect what you leave running
+
+`docker exec` returns when the process it started exits, whatever that
+process's children are still holding. A pipe does not. So in cluster mode
+an unredirected background process keeps the write end of the output
+filter's pipe open, the filter waits for an EOF that never arrives, and the
+case **hangs having already passed** — no output, no failure, nothing to
+read. Every case here already redirects (that is what `RUN_BG` is for), and
+the convention costs nothing to keep:
+
+```sh
+RUN 'nohup prte --daemonize ... >/tmp/prte.out 2>&1 & sleep 8'   # good
+RUN 'nohup prte --daemonize ... & sleep 8'                       # hangs on a cluster
+```
+
+`_relabel` closes fd 3 for the command for the same family of reasons: fd 3
+is the outer filter's pipe, and `prte --daemonize` reopens 0, 1 and 2 on
+`/dev/null` while keeping everything above them. That one cost ten minutes
+of watching a run sit still with a healthy DVM and no further output.
+
+### Which machine is the head node is detected, not assumed
+
+The preflight compares this machine's name against the first node in the
+list and drives the head node directly only when they are the same;
+otherwise it reaches it like any other node. Assuming "local" is wrong the
+moment you drive the suite from a login node that is not in the list —
+every tool then runs somewhere the suite does not think it is, and the
+symptom is a case reporting that a job landed on the wrong node, which
+reads as a PRRTE bug and is not one. That is exactly what running cluster
+mode against this swarm with a *shifted* node list produced, which is a
+second reason to keep using that as the transport's own test.
+
+### What the cluster preflight establishes, and why each one matters
+
+Everything the swarm supplies by construction has to be established or
+ruled out, because the failure mode of each is a case that *stops testing
+anything* rather than one that fails:
+
+- **the node list** — explicit, a hostfile, or the allocation we stand in;
+- **the install on every node**, findable from a *non-interactive* shell
+  (this is what `--enable-prte-prefix-by-default` is for);
+- **the PMIx the loader actually picks**, asked of `ldd prted` rather than
+  of pkg-config, because an install can sit beside a packaged PMIx of the
+  same soname. `pmix_cap` reads its `pmix_version.h`, and a gate that
+  cannot read anything answers "no" to every question;
+- **a scratch directory that is not shared** — the filem cases prove a
+  file crossed by its **absence** on the target, so a shared `$HOME` makes
+  them vacuous. Detected, and those cases skip rather than pass;
+- **`<sysconfdir>/prte.conf` writable and shared**, or the bootstrap cases
+  skip;
+- **whether a scheduler is holding these nodes**.
+
+### The scheduler environment is dropped, on purpose
+
+Under a live allocation `ras` takes the allocation, so a `--host` grow
+beyond it is correctly refused and every elastic phase fails for a reason
+that is not about the code. Cluster mode therefore unsets `SLURM_*`,
+`PBS_*`, `LSB_*`, `LSF_*` and `FLUX_*` in the shell each tool runs in. The
+nodes came *from* the allocation, so nothing is taken that was not
+granted — only the launcher changes, from the scheduler's to ssh.
+`PRTE_CLUSTER_KEEP_RM_ENV=1` keeps it, for deliberately testing the RM
+path; the preflight then says which cases will be refused.
+
+Testing the SLURM integration itself belongs in
+[`contrib/slurmswarm`](../slurmswarm/), not here (§12).
+
+### Node-count gating
+
+`phase_max_node` reads a phase's own source for the highest `node<N>` it
+names, and `phase` skips it when the cluster is smaller than that. It is
+derived rather than declared so it stays right as cases are added — **do
+not replace it with a hand-maintained table**. A handful of cases inside
+otherwise-small phases reach further and are wrapped in `have_nodes N`
+individually.
+
+Today: most phases need ≤4 nodes, `test_errmgr`/`test_grpcomm_ft`/
+`test_runtime` need 7, `test_event`/`test_low_radix_release*` need 8, and
+`test_rml` needs all 10.
+
+### Killing is scoped to us
+
+`$PSOPT` is empty in the swarm — the containers are ours entirely — and
+`-u <uid>` on a cluster, so the sweep between cases cannot reach another
+user's daemons. It **can** reach another job of your own on the same node,
+which is why the preflight says so in plain words before the first case.
+Use `kill_stray` rather than writing a bare `pkill` into a case.

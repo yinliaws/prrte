@@ -161,6 +161,11 @@ PRTE_EXPORT extern int prte_exit_status;
  * --host syntax. */
 #define PRTE_ACTIVATE_HOSTS "prte.activate.hosts"
 
+/* Spawn directive carrying the "--xterm" value: the ranks whose output is to
+ * be displayed in their own xterm window.  PMIx has no attribute for this.
+ * The value is a string in prte_parse_xterm_option() syntax. */
+#define PRTE_XTERM_RANKS "prte.xterm.ranks"
+
 /* State Machine lists */
 PRTE_EXPORT extern pmix_list_t prte_job_states;
 PRTE_EXPORT extern pmix_list_t prte_proc_states;
@@ -200,6 +205,34 @@ PRTE_EXPORT extern int prte_clean_output;
                                  newstatus));                                                  \
             prte_exit_status = newstatus;                                                      \
         }                                                                                      \
+    } while (0);
+
+/* Set the exit status even though one has already been recorded.
+ *
+ * PRTE_UPDATE_EXIT_STATUS keeps the FIRST non-zero status, which is right
+ * when several parts of a dying job all have an opinion: the first one is
+ * the cause and the rest are consequences. It is wrong in one place. A
+ * proxy tool (prterun) asks for its job with PMIx_Spawn and is told the
+ * outcome by its return; that answer is the tool's exit status by
+ * definition. But the DVM state machine runs in the same process, and when
+ * the job fails to launch on EVERY node there is nothing left to account
+ * for, so its own termination path can reach PRTE_UPDATE_EXIT_STATUS with
+ * the job's per-proc reason - PMIX_ERR_EXE_NOT_ACCESSIBLE, say - before
+ * PMIx_Spawn has returned PMIX_ERR_JOB_FAILED_TO_LAUNCH to the tool. The
+ * tool's answer is then refused as "already set", and the same failure
+ * exits 183 instead of 75 depending on which won.
+ *
+ * It is a race, so it is intermittent: measured at 3 in 14 on a four-node
+ * swarm. A partial failure never shows it - the ranks that did start keep
+ * the accounting alive past the tool's exit, so the state machine is not
+ * done in time - which is why the two disagreed.
+ */
+#define PRTE_FORCE_EXIT_STATUS(newstatus)                                              \
+    do {                                                                               \
+        PMIX_OUTPUT_VERBOSE((1, prte_debug_output, "%s:%s(%d) forcing exit status %d", \
+                             PRTE_NAME_PRINT(PRTE_PROC_MY_NAME), __FILE__, __LINE__,   \
+                             newstatus));                                              \
+        prte_exit_status = newstatus;                                                  \
     } while (0);
 
 /* sometimes we need to reset the exit status - for example, when we
@@ -899,10 +932,6 @@ PRTE_EXPORT extern pmix_pointer_array_t *prte_local_children;
 PRTE_EXPORT extern pmix_rank_t prte_total_procs;
 PRTE_EXPORT extern char *prte_base_compute_node_sig;
 PRTE_EXPORT extern bool prte_homo_nodes;
-
-/* IOF controls */
-/* generate new xterm windows to display output from specified ranks */
-PRTE_EXPORT extern char *prte_xterm;
 
 /* whether or not to report launch progress */
 PRTE_EXPORT extern bool prte_report_launch_progress;
